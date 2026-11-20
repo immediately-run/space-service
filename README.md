@@ -12,10 +12,11 @@ both on every change**. That is the condition the design rests on: it is what ke
 runtime from becoming a lock-in.
 
 The design is `STORE_PORTABILITY_SPEC` §5.5 in `immediately-run/docs`. This repository is the
-first slice of it (roadmap item R3-1282): files with the `rev` compare-and-set and the atomic
+first slice of it (roadmap items R3-1282 and R3-1283): files with the `rev` compare-and-set and the atomic
 commit, roles with the `everShared` latch, the soft-delete tombstone, the `seq` change feed with
 resume, the revocation push, and token verification. Invitations, quotas, blobs, the per-user
-index objects and the browser host's adapter are later items.
+index objects and the browser host's adapter are later items. It also holds the drill that
+measures the design on both hosts.
 
 ## Layout
 
@@ -32,7 +33,9 @@ src/core/         runtime-neutral: the whole service
 src/cloudflare/   the Worker and the `Space` Durable Object — wiring
 src/local/        the Node host: node:sqlite store, per-space queues, http + ws server — wiring
 src/client/       the reference client: FeedClient (the feed) and SpaceClient (the verbs)
+src/drill/        the R-STORE-2/3 drill: scenario (pure), report (pure), token minter, stall helper
 src/migrations/   the schema, append-only
+scripts/          drill CLI, staging-url, cost probe, drill summary, the TypeScript runner
 test/integration/ the conformance suite — every file runs on both hosts
 test/hosts/       the two hosts the suite runs against
 test/unit/        unit tests; the ones that need Node are listed in vitest.config.ts
@@ -161,7 +164,68 @@ are signed by a real signer with a key made for the run.
 | S-SS-8 | `S-SS-8.echo.test.ts` | A delta carries its writer's `opId`, live and replayed. |
 
 Unit tests: `protocol.test.ts` (both hosts), `feedClient.test.ts` (the 60 s watchdog, resume,
-echo), `queue.test.ts` (per-space queues), `hosts.test.ts` (no scenario runs on one host only).
+echo), `queue.test.ts` (per-space queues), `hosts.test.ts` (no scenario runs on one host only),
+and the drill's: `report.test.ts` (the scenario run against the local host with 200 writes, then
+summarized), `mint.test.ts`, `stagingUrl.test.ts`, `costProbe.test.ts`.
+
+## The drill
+
+The drill is the measurement `STORE_PORTABILITY_SPEC` §5.5.7 asks for (roadmap item R3-1283): one
+mounted space, one feed per member, 200 writes at a steady rate, a role downgrade, a delete, and
+a 60-second channel loss — over a real network, against a real host.
+
+```
+npm run drill -- --target <url> --key-file <private-key.pem> --members <n> [--writes 200] [--interval-ms 50] [--audience <aud>]
+```
+
+It prints one `DrillReport` as JSON on stdout:
+
+| Field | What it is |
+|---|---|
+| `deltaLatencyMs` | from the owner sending a `put` to each member's feed receiving its delta: p50, p95, max |
+| `ackLatencyMs` | from sending a `put` to its HTTP answer |
+| `deltasDelivered` | deltas received, of `writes × members` |
+| `accessAfterSetRole` | latency from the downgrade request to the member's `access`; whether it came before every later delta; what the member's next write got |
+| `revokedAfterDelete` | latency from the delete request to each feed's `revoked`; how many feeds got it; whether it came after each feed's last delta |
+| `channelLoss` | what ended a feed that was cut off without notice, and how long after its last frame |
+| `framesPerSubscriber` | frames received per member, by type |
+
+The drill measures and records. There is no threshold in it, and none in the test suite: the
+numbers are for a person to read.
+
+The channel-loss leg stops reading from one feed's TCP socket, so nothing arrives and nothing
+says so; that feed's own watchdog is what ends it. The leg takes the full 60 seconds, so a drill
+run takes a little over a minute.
+
+**The key.** `--key-file` is the PKCS#8 PEM of an ES256 private key whose public half the target
+trusts. The drill signs its tokens with it (`sub` `drill:<n>`, ten minutes) and never prints,
+logs or reports it.
+
+To drill a Node host on your machine:
+
+```
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out drill.pem
+openssl pkey -in drill.pem -pubout -out drill.pub.pem
+npm start -- --data-dir ./data --public-key-file drill.pub.pem --audience space-service-staging --port 8787 &
+npm run drill -- --target http://127.0.0.1:8787 --key-file drill.pem --members 3
+```
+
+### Staging and the workflows
+
+- `wrangler.toml` `[env.staging]` is the only deployment and the one home of its route, name and
+  audience; `scripts/staging-url.mjs` reads them from there. There is no production environment.
+- `.github/workflows/deploy-staging.yml` — on push to `main`, after the suite: `wrangler deploy
+  --env staging`, then sets the Worker secret `TOKEN_PUBLIC_KEY_PEM` from `DRILL_PUBLIC_KEY_PEM`.
+  Staging trusts that key and no other.
+- `.github/workflows/drill.yml` — on demand: starts the Node host on the runner, drills it,
+  drills the staging Worker, reads the staging run's cost, uploads `drill-report.json`
+  (`{ local, staging, cost }`) and writes a summary table.
+- Both run in the `staging` environment and fail at their first step, naming the secret, when
+  one they need is unset: `CLOUDFLARE_API_TOKEN`, `DRILL_PUBLIC_KEY_PEM`, and for the drill
+  `DRILL_PRIVATE_KEY_PEM`.
+- `scripts/cost-probe.mjs` asks Cloudflare's GraphQL Analytics API for the staging Worker's and
+  its objects' requests and duration over the run. When the API refuses or has nothing, the
+  report says `cost: unavailable — <reason>` and the run stays green. It never estimates.
 
 ## Decisions made while building
 
@@ -186,3 +250,8 @@ rediscovered.
 - **Retention is a count** (`FEED_RETENTION`). The spec's age bound waits for the measured numbers.
 - **On the Node host, a space has no database until it is created**, so probing ids creates no
   files.
+- **The staging route needs a DNS record.** `[env.staging]` uses a zone route, as Baton does, so
+  the hostname must resolve through Cloudflare before the first drill.
+- **The cost probe's query is unverified against the live API.** Its dataset and field names
+  follow Cloudflare's documentation; no token was available to run it. If a name is wrong the
+  report says `unavailable` with the API's own message, which names the field.

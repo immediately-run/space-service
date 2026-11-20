@@ -1,0 +1,64 @@
+name: deploy-staging
+
+# Deploy the staging Worker (STORE_PORTABILITY_SPEC §5.5.7, R3-1283): on every push to main the
+# suite runs, then `[env.staging]` deploys. Nothing deploys from a red head. There is no
+# production environment.
+#
+# The secrets live in this repository's `staging` environment, set by the owner in R3-1281:
+# CLOUDFLARE_API_TOKEN, and DRILL_PUBLIC_KEY_PEM — the one key the staging Worker trusts. Until
+# both exist the deploy job fails at its first step, naming the missing one.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      DRILL_PUBLIC_KEY_PEM: ${{ secrets.DRILL_PUBLIC_KEY_PEM }}
+    steps:
+      - name: The staging secrets are set
+        run: |
+          for name in CLOUDFLARE_API_TOKEN DRILL_PUBLIC_KEY_PEM; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not set — the owner adds it to this repository's staging environment (R3-1281)."
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Deploy staging
+        run: npx wrangler deploy --env staging
+      # The Worker accepts tokens signed by this key and by no other. Until this step has run
+      # on a fresh Worker it has no key at all, and refuses everything.
+      - name: Trust the drill key, and only it
+        run: printf '%s' "$DRILL_PUBLIC_KEY_PEM" | npx wrangler secret put TOKEN_PUBLIC_KEY_PEM --env staging

@@ -28,3 +28,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Lint the workflows (actionlint)
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color

@@ -1,0 +1,109 @@
+name: drill
+
+# The R-STORE-2/3 drill (STORE_PORTABILITY_SPEC §5.5.7, R3-1283), on demand: against the Node host
+# started on this runner, and against the deployed staging Worker. It uploads drill-report.json
+# and writes a summary table. The numbers are recorded, not judged: the run is red only when the
+# drill itself could not complete.
+#
+# The secrets live in this repository's `staging` environment (R3-1281). Until all three exist
+# the job fails at its first step, naming the missing one.
+on:
+  workflow_dispatch:
+    inputs:
+      members:
+        description: Members of the drill's space (one feed each)
+        default: '3'
+      writes:
+        description: Files the owner writes
+        default: '200'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      MEMBERS: ${{ inputs.members }}
+      WRITES: ${{ inputs.writes }}
+    steps:
+      - name: The staging secrets are set
+        env:
+          DRILL_PRIVATE_KEY_PEM: ${{ secrets.DRILL_PRIVATE_KEY_PEM }}
+          DRILL_PUBLIC_KEY_PEM: ${{ secrets.DRILL_PUBLIC_KEY_PEM }}
+        run: |
+          for name in CLOUDFLARE_API_TOKEN DRILL_PRIVATE_KEY_PEM DRILL_PUBLIC_KEY_PEM; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not set — the owner adds it to this repository's staging environment (R3-1281)."
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # The key pair goes to files outside the checkout, readable by this user only, and is
+      # removed in the last step. Nothing prints it.
+      - name: Write the drill key pair to the runner's temp directory
+        env:
+          DRILL_PRIVATE_KEY_PEM: ${{ secrets.DRILL_PRIVATE_KEY_PEM }}
+          DRILL_PUBLIC_KEY_PEM: ${{ secrets.DRILL_PUBLIC_KEY_PEM }}
+        run: |
+          umask 077
+          printf '%s\n' "$DRILL_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/drill.pem"
+          printf '%s\n' "$DRILL_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/drill.pub.pem"
+
+      - name: Start the Node host on the runner
+        run: |
+          AUDIENCE=$(node scripts/staging-url.mjs --audience)
+          nohup npm start -- --data-dir "$RUNNER_TEMP/spaces" --public-key-file "$RUNNER_TEMP/drill.pub.pem" --audience "$AUDIENCE" --port 8787 > "$RUNNER_TEMP/host.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -s -o /dev/null http://127.0.0.1:8787/; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::the Node host did not start"
+          cat "$RUNNER_TEMP/host.log"
+          exit 1
+
+      - name: Drill the Node host
+        run: npm run --silent drill -- --target http://127.0.0.1:8787 --key-file "$RUNNER_TEMP/drill.pem" --members "$MEMBERS" --writes "$WRITES" > "$RUNNER_TEMP/local.json"
+
+      - name: Drill the staging Worker
+        id: staging
+        run: |
+          echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          npm run --silent drill -- --target "$(node scripts/staging-url.mjs)" --key-file "$RUNNER_TEMP/drill.pem" --members "$MEMBERS" --writes "$WRITES" > "$RUNNER_TEMP/staging.json"
+          echo "until=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # The analytics datasets trail real time, so the probe waits before it reads. If they are
+      # still empty, or the API refuses, the report says `unavailable` and the run stays green.
+      - name: Read the staging run's cost
+        env:
+          SINCE: ${{ steps.staging.outputs.since }}
+          UNTIL: ${{ steps.staging.outputs.until }}
+        run: |
+          sleep 180
+          node scripts/cost-probe.mjs --script "$(node scripts/staging-url.mjs --name)" --since "$SINCE" --until "$UNTIL" > "$RUNNER_TEMP/cost.json"
+
+      - name: Summarize
+        run: node scripts/drill-summary.mjs "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/staging.json" "$RUNNER_TEMP/cost.json" drill-report.json >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drill-report
+          path: drill-report.json
+          if-no-files-found: error
+
+      - name: Remove the key pair
+        if: always()
+        run: rm -f "$RUNNER_TEMP/drill.pem" "$RUNNER_TEMP/drill.pub.pem"
