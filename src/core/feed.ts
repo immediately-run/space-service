@@ -3,7 +3,7 @@
 // Everything here is synchronous, so a commit and its delta, or a membership change and its
 // `access`/`revoked` push and close, are one turn.
 import type { Claims } from './auth';
-import { deltasSince, head, snapshotPages } from './files';
+import { deltasSince, head, snapshotPages, type StoredDoc } from './files';
 import type { Attachment, Ports, Socket } from './ports';
 import { CLOSE, FORBIDDEN_FRAME, HELLO_TIMEOUT_MS, REVOKED_FRAME, accessFrame, deltaFrame, snapshotFrame, type DeltaChange, type Role } from './protocol';
 
@@ -77,8 +77,14 @@ export function admit(ports: Ports, socket: Socket, claims: Claims, role: Role, 
   if (deltas) {
     for (const d of deltas) alive = alive && send(socket, deltaFrame(d.seq, d.changes, d.opId));
   } else {
-    const pages = snapshotPages(store);
-    pages.forEach((docs, i) => (alive = alive && send(socket, snapshotFrame(seq, docs, i < pages.length - 1))));
+    // One page behind, so each frame knows whether another follows.
+    let held: StoredDoc[] | null = null;
+    for (const page of snapshotPages(store)) {
+      if (!alive) break;
+      if (held) alive = send(socket, snapshotFrame(seq, held, true));
+      held = page;
+    }
+    if (alive && held) alive = send(socket, snapshotFrame(seq, held, false));
   }
   if (!alive) close(socket, CLOSE.protocol);
   reschedule(ports);

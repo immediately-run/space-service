@@ -46,10 +46,12 @@ export const ERROR = {
   invalid: 'invalid',
   /** A granted caller read a path that holds no file. */
   notFound: 'notFound',
+  /** The host failed; nothing about the request or the space. */
+  internal: 'internal',
 } as const;
 export type ErrorCode = (typeof ERROR)[keyof typeof ERROR];
 
-const HTTP_STATUS: Record<ErrorCode, number> = { forbidden: 403, conflict: 409, boundExceeded: 413, invalid: 400, notFound: 404 };
+const HTTP_STATUS: Record<ErrorCode, number> = { forbidden: 403, conflict: 409, boundExceeded: 413, invalid: 400, notFound: 404, internal: 500 };
 
 /** A verb's answer: an HTTP status and a JSON body. */
 export interface Reply {
@@ -92,13 +94,22 @@ export const byteLength = (s: string): number => utf8.encode(s).length;
 
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isSeq = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
-const isPath = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && !x.includes('\0') && byteLength(x) <= MAX_PATH_BYTES;
-const isUid = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && x.length <= MAX_UID_LENGTH;
+const utf8Strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+/** No lone surrogate: two such strings can differ here and be one string once stored. */
+const wellFormed = (s: string): boolean => {
+  try {
+    return utf8Strict.decode(utf8.encode(s)) === s;
+  } catch {
+    return false;
+  }
+};
+const isPath = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && !x.includes('\0') && byteLength(x) <= MAX_PATH_BYTES && wellFormed(x);
+const isUid = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && x.length <= MAX_UID_LENGTH && wellFormed(x);
 
 /** `opId` is optional: undefined when absent, null when malformed. */
 function opIdOf(body: Record<string, unknown>): string | undefined | null {
   if (body.opId === undefined) return undefined;
-  return typeof body.opId === 'string' && body.opId.length > 0 && body.opId.length <= MAX_OP_ID_LENGTH ? body.opId : null;
+  return typeof body.opId === 'string' && body.opId.length > 0 && body.opId.length <= MAX_OP_ID_LENGTH && wellFormed(body.opId) ? body.opId : null;
 }
 
 function parseChange(x: unknown, op: Op): Change | null {

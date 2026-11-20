@@ -21,6 +21,7 @@ export const NODE_ONLY = [
   'test/unit/feedClient.test.ts',
   'test/unit/queue.test.ts',
   'test/unit/hosts.test.ts',
+  'test/unit/localHost.test.ts',
   'test/unit/report.test.ts',
   'test/unit/mint.test.ts',
   'test/unit/stagingUrl.test.ts',

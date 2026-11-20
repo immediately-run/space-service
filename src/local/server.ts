@@ -46,11 +46,15 @@ export function serve(host: LocalHost): Server {
   const server = createServer((req, res) => {
     toRequest(req)
       .then((r) => (r ? host.handle(r) : respond(fail(ERROR.invalid))))
+      // A failure of the host itself — a database that will not open — is said, not hung up on.
+      .catch(() => respond(fail(ERROR.internal)))
       .then((out) => send(res, out))
       .catch(() => res.destroy());
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_FRAME });
   server.on('upgrade', (req, socket, head) => {
+    // A peer that resets mid-handshake must not take the process down.
+    socket.on('error', () => socket.destroy());
     const target = req.url ?? '/';
     const r = target.startsWith('/') ? route(req.method ?? 'GET', `http://space-service${target}`) : null;
     if (!r || !('feed' in r)) {

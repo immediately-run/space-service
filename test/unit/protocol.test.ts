@@ -32,6 +32,10 @@ it('refuses malformed writes', () => {
   expect(parseSingle({ path: 'é'.repeat(MAX_PATH_BYTES / 2 + 1), data: 1 }, 'put')).toBeNull();
   expect(parseSingle({ path: '/a', data: 'é'.repeat((MAX_FILE_SIZE - 2) / 2) }, 'put')).not.toBeNull();
   expect(parseSingle({ path: '/a', data: 'é'.repeat((MAX_FILE_SIZE - 2) / 2 + 1) }, 'put')).toBeNull();
+  // A lone surrogate would be stored as U+FFFD, where two different paths become one.
+  expect(parseSingle({ path: '/\ud800', data: 1 }, 'put')).toBeNull();
+  expect(parseCommit({ changes: [{ op: 'put', path: '/\ud800', data: 1 }, { op: 'put', path: '/\ud801', data: 1 }] })).toBeNull();
+  expect(parseSingle({ path: '/😀', data: '\ud800' }, 'put')).not.toBeNull();
 });
 
 it('parses a commit, each path once, within the bound', () => {

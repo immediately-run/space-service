@@ -79,6 +79,8 @@ export class FeedClient {
   private retry: unknown;
   private readonly pending = new Set<string>();
   private partial: Doc[] = [];
+  /** The current socket's hello was accepted. */
+  private admitted = false;
 
   constructor(private readonly opts: FeedClientOptions) {
     this.timers = opts.timers ?? systemTimers;
@@ -108,6 +110,11 @@ export class FeedClient {
   /** Expect a delta carrying `opId`: a write this holder is about to make. */
   track(opId: string): void {
     this.pending.add(opId);
+  }
+
+  /** Stop expecting `opId`: its write failed, so no delta will carry it. */
+  untrack(opId: string): void {
+    this.pending.delete(opId);
   }
 
   private drop(): void {
@@ -168,6 +175,7 @@ export class FeedClient {
     }
     this.socket = socket;
     this.partial = [];
+    this.admitted = false;
     socket.addEventListener('open', () => {
       if (!current()) return;
       try {
@@ -202,16 +210,25 @@ export class FeedClient {
   private receive(data: unknown): void {
     const frame = parseServerFrame(data);
     if (!frame) return;
-    this.lastFrameAt = this.opts.clock.now();
-    this.armWatchdog();
     const { events } = this.opts;
     events.frame?.(frame.type);
+    if (frame.type === FRAME.access) {
+      // Admitted — which is not yet proof the feed works. A socket that is admitted and then
+      // dropped, over and over, must still run out the watchdog, so `access` neither feeds it
+      // nor resets the backoff.
+      this.admitted = true;
+      this.role = frame.role;
+      events.access?.(frame.role, frame.seq);
+      return;
+    }
+    // The feed is alive when an admitted socket delivers: a heartbeat on a socket whose hello
+    // was never accepted says nothing about this holder's access.
+    if (this.admitted || frame.type === FRAME.revoked || frame.type === FRAME.forbidden) {
+      this.lastFrameAt = this.opts.clock.now();
+      this.armWatchdog();
+      this.backoff = this.opts.backoffMs ?? 250;
+    }
     switch (frame.type) {
-      case FRAME.access:
-        this.role = frame.role;
-        this.backoff = this.opts.backoffMs ?? 250;
-        events.access?.(frame.role, frame.seq);
-        return;
       case FRAME.snapshot:
         this.partial.push(...frame.docs);
         if (frame.more) return;

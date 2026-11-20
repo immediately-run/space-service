@@ -166,7 +166,8 @@ are signed by a real signer with a key made for the run.
 Unit tests: `protocol.test.ts` (both hosts), `feedClient.test.ts` (the 60 s watchdog, resume,
 echo), `queue.test.ts` (per-space queues), `hosts.test.ts` (no scenario runs on one host only),
 and the drill's: `report.test.ts` (the scenario run against the local host with 200 writes, then
-summarized), `mint.test.ts`, `stagingUrl.test.ts`, `costProbe.test.ts`.
+summarized), `mint.test.ts`, `stagingUrl.test.ts`, `costProbe.test.ts`; and `localHost.test.ts` (an absent space is indistinguishable on the feed,
+case-safe file names, databases open only while in use).
 
 ## The drill
 
@@ -250,6 +251,18 @@ rediscovered.
 - **Retention is a count** (`FEED_RETENTION`). The spec's age bound waits for the measured numbers.
 - **On the Node host, a space has no database until it is created**, so probing ids creates no
   files.
+- **A space's database is open only while in use** on the Node host: it closes when no socket is
+  on it and reopens on the next request, so the process does not accumulate open files.
+- **File names are case-safe.** Space ids differ by case; on the Node host each capital is
+  written as `_` plus its lower-case letter, so two ids never share a file on any file system.
+- **The client's watchdog counts only an admitted socket's frames.** A heartbeat on a socket
+  whose hello was never accepted, or an `access` that is followed by a drop, does not keep a
+  mount alive.
+- **`opId` is a hint, not a proof.** Any writer can send any `opId`; a holder that needs to know
+  a delta is its own should also compare the `seq` its write was answered with.
+- **Known limit: a stuck space still answers pings.** Heartbeats are answered outside the core
+  on both hosts (that is what lets an object hibernate), so a holder's watchdog proves the
+  connection, not that the space is processing requests.
 - **The staging route needs a DNS record.** `[env.staging]` uses a zone route, as Baton does, so
   the hostname must resolve through Cloudflare before the first drill.
 - **The cost probe's query is unverified against the live API.** Its dataset and field names

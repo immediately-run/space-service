@@ -8,7 +8,7 @@ import type { WebSocket } from 'ws';
 import { verifyToken } from '../core/auth';
 import { bearer, forbidden, notRouted, readBody, respond, route } from '../core/http';
 import type { Attachment, Clock, Config, Scheduler, Socket } from '../core/ports';
-import { CLOSE, FORBIDDEN_FRAME, HEARTBEAT_FRAME, HELLO_TIMEOUT_MS, PING_FRAME, VERB } from '../core/protocol';
+import { CLOSE, FORBIDDEN_FRAME, FRAME, HEARTBEAT_FRAME, HELLO_TIMEOUT_MS, PING_FRAME, VERB, parseClientFrame } from '../core/protocol';
 import { SpaceCore } from '../core/space';
 import { systemClock } from './clock';
 import { SpaceQueues } from './queue';
@@ -24,6 +24,13 @@ export interface LocalOptions {
 }
 
 const MAX_TIMEOUT = 2 ** 31 - 1;
+
+/**
+ * A space's file name. Ids differ by case; file names, on some file systems, do not — so each
+ * capital (and the escape itself) is written as `_` and its lower-case letter. Injective, and
+ * no two ids meet in one file anywhere.
+ */
+export const spaceFile = (spaceId: string): string => `${spaceId.replace(/[A-Z_]/g, (c) => `_${c.toLowerCase()}`)}.sqlite`;
 
 /** A `ws` socket as the core's Socket; its attachment lives in this process. */
 class LocalSocket implements Socket {
@@ -91,7 +98,7 @@ export class LocalHost {
     const open = this.spaces.get(spaceId);
     if (open) return open;
     const memory = this.opts.dataDir === ':memory:';
-    const path = memory ? ':memory:' : join(this.opts.dataDir, `${spaceId}.sqlite`);
+    const path = memory ? ':memory:' : join(this.opts.dataDir, spaceFile(spaceId));
     if (!create && (memory || !existsSync(path))) return null;
     const { db, store } = openStore(path);
     const sockets = new Set<LocalSocket>();
@@ -122,20 +129,50 @@ export class LocalHost {
       const body = await readBody(req);
       const space = this.space(r.spaceId, r.verb === VERB.create);
       if (!space) return forbidden();
-      return respond(space.core.request(r.verb, claims, body));
+      try {
+        return respond(space.core.request(r.verb, claims, body));
+      } finally {
+        this.release(r.spaceId);
+      }
     });
+  }
+
+  /**
+   * Close a space's database once no socket is on it. A space is open while it is being used,
+   * not for the life of the process; a file-backed one reopens on its next request. (An
+   * in-memory space is its only copy, so it stays.)
+   */
+  private release(spaceId: string): void {
+    const space = this.spaces.get(spaceId);
+    if (!space || space.sockets.size || this.opts.dataDir === ':memory:') return;
+    space.scheduler.stop();
+    space.db.close();
+    this.spaces.delete(spaceId);
   }
 
   /** A feed socket for `spaceId`, just upgraded. */
   connect(spaceId: string, ws: WebSocket): void {
     const socket = new LocalSocket(ws);
-    const refuse = () => {
+    // A socket on a space that does not exist is answered here exactly as the core answers an
+    // unadmitted socket on one that does (P7): a ping gets its heartbeat, a hello is verified
+    // and then refused, anything else is refused, and silence is closed at the same deadline
+    // with no frame.
+    const refuse = (frame: boolean) => {
       try {
-        if (ws.readyState === ws.OPEN) ws.send(FORBIDDEN_FRAME);
+        if (frame && ws.readyState === ws.OPEN) ws.send(FORBIDDEN_FRAME);
         ws.close(CLOSE.forbidden.code, CLOSE.forbidden.reason);
       } catch {
         // Gone.
       }
+    };
+    const absent = async (text: string | null) => {
+      const frame = parseClientFrame(text);
+      if (frame?.type === FRAME.ping) {
+        if (ws.readyState === ws.OPEN) ws.send(HEARTBEAT_FRAME);
+        return;
+      }
+      if (frame?.type === FRAME.hello) await verifyToken(frame.token, this.opts.config, this.clock.now());
+      refuse(true);
     };
     /** The socket's space, with the socket registered on it — or null while no such space exists. */
     let gone = false;
@@ -147,11 +184,14 @@ export class LocalHost {
       }
       return space;
     };
-    // A socket on a space that does not exist looks, from outside, like any socket awaiting its
-    // hello: it is refused when the hello comes, or at the same deadline.
-    const deadline = setTimeout(() => void this.queues.run(spaceId, () => void (joined() ?? refuse())), HELLO_TIMEOUT_MS);
+    /** The host itself failed (the database would not open): close, saying nothing of the space. */
+    const broken = (e: unknown) => {
+      console.error('space-service: socket failed', e);
+      ws.close(1011, 'internal');
+    };
+    const deadline = setTimeout(() => void this.queues.run(spaceId, () => void (joined() ?? refuse(false))).catch(broken), HELLO_TIMEOUT_MS);
     deadline.unref();
-    void this.queues.run(spaceId, () => void joined());
+    void this.queues.run(spaceId, () => void joined()).catch(broken);
 
     ws.on('message', (data, isBinary) => {
       const text = isBinary ? null : data.toString();
@@ -164,10 +204,10 @@ export class LocalHost {
         .run(spaceId, async () => {
           const space = joined();
           if (gone) return;
-          if (!space) return refuse();
+          if (!space) return absent(text);
           await space.core.message(socket, text);
         })
-        .catch((e) => console.error('space-service: socket message failed', e));
+        .catch(broken);
     });
     ws.on('close', () => {
       gone = true;
@@ -175,6 +215,7 @@ export class LocalHost {
       void this.queues.run(spaceId, () => {
         const space = this.spaces.get(spaceId);
         if (space?.sockets.delete(socket)) space.core.closed();
+        this.release(spaceId);
       });
     });
     ws.on('error', () => ws.terminate());

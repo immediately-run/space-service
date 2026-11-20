@@ -79,12 +79,40 @@ it('a heartbeat resets the timer', async () => {
   const client = make();
   client.start();
   const socket = await opened();
+  socket.frame(accessFrame('reader', 0));
   await vi.advanceTimersByTimeAsync(30_000);
   socket.frame(HEARTBEAT_FRAME);
   await vi.advanceTimersByTimeAsync(59_999);
   expect(revoked).toEqual([]);
   await vi.advanceTimersByTimeAsync(1);
   expect(revoked).toEqual(['channel-lost']);
+});
+
+it('heartbeats on a socket that was never admitted do not keep the mount alive', async () => {
+  const client = make();
+  client.start();
+  const socket = await opened();
+  for (let t = 0; t < 59_000; t += 1_000) {
+    socket.frame(HEARTBEAT_FRAME);
+    await vi.advanceTimersByTimeAsync(1_000);
+  }
+  expect(revoked).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(revoked).toEqual(['channel-lost']);
+});
+
+it('being admitted and dropped, over and over, still fails closed at 60 s', async () => {
+  const client = make();
+  client.start();
+  for (let i = 0; i < 400 && !revoked.length; i++) {
+    const socket = await opened();
+    socket.frame(accessFrame('reader', 7));
+    socket.emit('close', { code: 4400 });
+    await vi.advanceTimersByTimeAsync(1_000);
+  }
+  expect(revoked).toEqual(['channel-lost']);
+  // It backed off rather than hammering: a handful of attempts, not hundreds.
+  expect(FakeSocket.all.length).toBeLessThan(40);
 });
 
 it('a socket that keeps failing to connect still fails closed at 60 s', async () => {

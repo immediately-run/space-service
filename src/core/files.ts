@@ -3,7 +3,7 @@
 // commits whole or not at all, takes exactly one `seq`, and writes its log rows in the same
 // transaction as the files — so a rename is one delta to every observer.
 import type { Store } from './ports';
-import { FEED_RETENTION, OP, SNAPSHOT_FRAME_BYTES, type Change, type DeltaChange } from './protocol';
+import { FEED_RETENTION, OP, SNAPSHOT_FRAME_BYTES, byteLength, type Change, type DeltaChange } from './protocol';
 
 export type CommitResult =
   /** Committed. `changes` is empty when nothing changed (deleting what was not there). */
@@ -82,29 +82,31 @@ export function deltasSince(store: Store, sinceSeq: number): LoggedDelta[] | nul
   return out;
 }
 
-type StoredDoc = { path: string; data: string; rev: number };
+export type StoredDoc = { path: string; data: string; rev: number };
 
-/** Every file, in path order, in groups sized for one snapshot frame each (at least one group). */
-export function snapshotPages(store: Store): StoredDoc[][] {
-  const pages: StoredDoc[][] = [];
+/**
+ * Every file, in path order, in groups sized for one snapshot frame each — at least one group,
+ * read and yielded a bounded step at a time, so neither a statement nor a frame holds the whole
+ * space. The caller consumes it within one turn.
+ */
+export function* snapshotPages(store: Store): Generator<StoredDoc[]> {
   let page: StoredDoc[] = [];
   let bytes = 0;
   let after = '';
   for (;;) {
-    // Read in bounded steps: one statement never holds the whole space.
     const rows = store.exec<StoredDoc>('SELECT path, data, rev FROM files WHERE path > ? ORDER BY path LIMIT 64', after).toArray();
     if (!rows.length) break;
     for (const doc of rows) {
-      if (page.length && bytes + doc.data.length > SNAPSHOT_FRAME_BYTES) {
-        pages.push(page);
+      const size = byteLength(doc.data);
+      if (page.length && bytes + size > SNAPSHOT_FRAME_BYTES) {
+        yield page;
         page = [];
         bytes = 0;
       }
       page.push(doc);
-      bytes += doc.data.length;
+      bytes += size;
     }
     after = rows[rows.length - 1].path;
   }
-  pages.push(page);
-  return pages;
+  yield page;
 }
