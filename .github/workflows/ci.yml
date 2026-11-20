@@ -1,0 +1,30 @@
+name: ci
+
+# The space service's gate: the type check and the whole suite on every pull request and on
+# main. The suite is the conformance suite — every integration scenario runs in the Workers
+# runtime and again on the Node host (STORE_PORTABILITY_SPEC §5.5.6) — plus the unit tests.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

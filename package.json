@@ -1,0 +1,36 @@
+{
+  "name": "@immediately-run/space-service",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "The space service — shared spaces on per-space SQLite: one runtime-neutral core, a Durable Object per space on Cloudflare, a Node + node:sqlite process for a customer (STORE_PORTABILITY_SPEC §5.5).",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/immediately-run/space-service.git"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.local.json",
+    "start": "node scripts/run-ts.mjs src/local/main.ts",
+    "drill": "node scripts/run-ts.mjs scripts/drill.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.12",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.1",
+    "@cloudflare/workers-types": "^5.20261013.1",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "0.28.2",
+    "smol-toml": "^1.9.1",
+    "typescript": "^5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "^4.150.0"
+  }
+}

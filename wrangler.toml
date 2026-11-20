@@ -1,0 +1,40 @@
+# The space service on Cloudflare (STORE_PORTABILITY_SPEC §5.5.1): a Worker that verifies the
+# token and routes, and one SQLite-backed Durable Object per space.
+#
+# The top level is what the test suite loads; it has no route and is never deployed. The only
+# deployment is `[env.staging]` (R3-1283). There is no production environment.
+#
+# No key lives in this file. TOKEN_PUBLIC_KEY_PEM is a Worker secret in a deployment and a
+# per-run key in the tests (vitest.config.ts).
+name = "space-service"
+main = "src/cloudflare/worker.ts"
+compatibility_date = "2026-09-01"
+
+[[durable_objects.bindings]]
+name = "SPACE"
+class_name = "Space"
+
+# Inherited by every environment.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Space"]
+
+[[rules]]
+type = "Text"
+globs = ["**/*.sql"]
+fallthrough = false
+
+[vars]
+TOKEN_AUDIENCE = "space-service"
+
+[env.staging]
+name = "space-service-staging"
+# The one home of the staging route: scripts/staging-url.mjs reads it from here.
+routes = [{ pattern = "space-service-staging.immediately.run/*", zone_name = "immediately.run" }]
+
+[env.staging.vars]
+TOKEN_AUDIENCE = "space-service-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "SPACE"
+class_name = "Space"

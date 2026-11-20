@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2023"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "paths": { "#host": ["./test/hosts/cloudflare.ts"] }
+  },
+  "include": [
+    "src/core",
+    "src/cloudflare",
+    "src/client",
+    "src/migrations",
+    "src/modules.d.ts",
+    "src/env.d.ts",
+    "test/hosts/cloudflare.ts",
+    "test/lib",
+    "test/setup.ts",
+    "test/integration",
+    "test/unit/protocol.test.ts"
+  ]
+}

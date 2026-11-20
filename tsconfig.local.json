@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
+    "paths": { "#host": ["./test/hosts/local.ts"] }
+  },
+  "include": [
+    "src/core",
+    "src/local",
+    "src/client",
+    "src/drill",
+    "src/migrations",
+    "src/modules.d.ts",
+    "scripts",
+    "test/hosts/local.ts",
+    "test/provided.d.ts",
+    "test/lib",
+    "test/setup.ts",
+    "test/integration",
+    "test/unit",
+    "vitest.config.ts"
+  ]
+}
